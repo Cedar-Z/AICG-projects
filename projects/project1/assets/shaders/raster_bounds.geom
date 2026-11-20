@@ -43,7 +43,41 @@ int clipAgainst(inout ClipVertex polygon[9], int count, vec4 plane) {
     // Hint: visit every edge, including the edge from the last vertex to the first;
     // emit a crossing vertex when the endpoints are on opposite sides.
     /*************************************** TODO BEGIN ******************************************/
-    return 0;
+    // Scratch storage: a plane can add one vertex, so the result never exceeds nine.
+    ClipVertex clipped[9];
+    int clippedCount = 0;
+
+    for (int current = 0; current < count; ++current) {
+        ClipVertex from = polygon[current];
+        ClipVertex to = polygon[(current + 1) % count];
+
+        // A nonnegative signed distance keeps the vertex, exactly as on the CPU.
+        float fromDistance = dot(plane, from.clip);
+        float toDistance = dot(plane, to.clip);
+        bool fromInside = fromDistance >= 0.0;
+        bool toInside = toDistance >= 0.0;
+
+        if (fromInside && clippedCount < 9) {
+            clipped[clippedCount] = from;
+            ++clippedCount;
+        }
+
+        // The endpoints are on opposite sides, so the denominator cannot vanish.
+        if (fromInside != toInside && clippedCount < 9) {
+            float t = fromDistance / (fromDistance - toDistance);
+            clipped[clippedCount].clip = mix(from.clip, to.clip, t);
+            clipped[clippedCount].worldPosition = mix(from.worldPosition, to.worldPosition, t);
+            clipped[clippedCount].normal = mix(from.normal, to.normal, t);
+            clipped[clippedCount].uv = mix(from.uv, to.uv, t);
+            ++clippedCount;
+        }
+    }
+
+    for (int current = 0; current < clippedCount; ++current) {
+        polygon[current] = clipped[current];
+    }
+
+    return clippedCount;
     /**************************************** TODO END *******************************************/
 }
 
@@ -75,6 +109,17 @@ void main() {
         // Hint: divide xyz by clip.w, map NDC xy to pixels and z to [0, 1],
         // and retain 1 / clip.w for perspective-correct interpolation.
         /*************************************** TODO BEGIN ******************************************/
+        for (int corner = 0; corner < 3; ++corner) {
+            float invW = 1.0 / triangle[corner].clip.w;
+            vec3 ndc = triangle[corner].clip.xyz * invW;
+
+            // Same viewport mapping as buildScreenTriangles(): origin bottom-left, Y up.
+            screenTriangle[corner].screenAndInvW =
+                vec4((ndc.xy * 0.5 + 0.5) * uExtent, ndc.z * 0.5 + 0.5, invW);
+            screenTriangle[corner].worldPosition = triangle[corner].worldPosition;
+            screenTriangle[corner].normal = triangle[corner].normal;
+            screenTriangle[corner].uv = triangle[corner].uv;
+        }
         /**************************************** TODO END *******************************************/
 
         // TODO: Bound the candidate pixels and emit a primitive covering them.
@@ -82,6 +127,41 @@ void main() {
         //       will perform the exact per-pixel triangle coverage test.
         // Hint: Use EmitVertex/EmitPrimitive
         /*************************************** TODO BEGIN ******************************************/
+        // One pixel of padding, so samples lying on a rounded bound are still covered.
+        vec2 lower = min(min(screenTriangle[0].screenAndInvW.xy, screenTriangle[1].screenAndInvW.xy),
+                         screenTriangle[2].screenAndInvW.xy) - vec2(1.0);
+        vec2 upper = max(max(screenTriangle[0].screenAndInvW.xy, screenTriangle[1].screenAndInvW.xy),
+                         screenTriangle[2].screenAndInvW.xy) + vec2(1.0);
+        vec2 span = max(upper - lower, vec2(2.0));
+
+        // A right triangle whose hypotenuse touches the padded far corner of the box,
+        // so the whole bounding rectangle is inside one primitive (three vertices only).
+        vec2 corners[3] = vec2[3](lower,
+                                  lower + vec2(2.0 * span.x, 0.0),
+                                  lower + vec2(0.0, 2.0 * span.y));
+
+        // Constant across the emitted primitive: the fragment stage re-evaluates the
+        // original screen triangle from these three vertices.
+        gScreenAndInvW[0] = screenTriangle[0].screenAndInvW;
+        gScreenAndInvW[1] = screenTriangle[1].screenAndInvW;
+        gScreenAndInvW[2] = screenTriangle[2].screenAndInvW;
+        gWorld[0] = screenTriangle[0].worldPosition;
+        gWorld[1] = screenTriangle[1].worldPosition;
+        gWorld[2] = screenTriangle[2].worldPosition;
+        gNormal[0] = screenTriangle[0].normal;
+        gNormal[1] = screenTriangle[1].normal;
+        gNormal[2] = screenTriangle[2].normal;
+        gUv[0] = screenTriangle[0].uv;
+        gUv[1] = screenTriangle[1].uv;
+        gUv[2] = screenTriangle[2].uv;
+
+        for (int corner = 0; corner < 3; ++corner) {
+            // Pixels back to NDC. Depth comes from gl_FragDepth, so z is irrelevant
+            // here, and the primitive may extend past the viewport (OpenGL clips it).
+            gl_Position = vec4(corners[corner] / uExtent * 2.0 - 1.0, 0.0, 1.0);
+            EmitVertex();
+        }
+        EndPrimitive();
         /**************************************** TODO END *******************************************/
     }
 }

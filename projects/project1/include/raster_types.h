@@ -78,4 +78,9 @@ struct FrameState {
     DirectionalLight directionalLight;
     // Raster target size in physical framebuffer pixels.
     glm::uvec2 extent{1280, 720};
+    // Debug visualization used by the staged-debugging figures:
+    // 0 = full PBR shading, 1 = constant color (coverage only), 2 = screen-space
+    // barycentric weights as RGB, 3 = UV as RGB, 4 = world normal * 0.5 + 0.5.
+    // Both rasterizers read the same value so the two figures stay comparable.
+    int debugView = 0;
 };

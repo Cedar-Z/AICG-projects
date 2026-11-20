@@ -65,6 +65,42 @@ clipAgainst(std::array<ClipVertex, kMaxClippedPolygonVertices>& polygon, size_t&
     // Hint: Copy the clipped results to polygon as the output
 
     /**************************************** Todo Begin *****************************************/
+    std::array<ClipVertex, kMaxClippedPolygonVertices> clipped{};
+    size_t clippedCount = 0;
+
+    // Treat the polygon as a closed loop: every vertex is also the end of the edge started by
+    // its predecessor, so the last iteration walks the edge (count - 1) -> 0.
+    for (size_t current = 0; current < count; ++current) {
+        ClipVertex const& from = polygon[current];
+        ClipVertex const& to = polygon[(current + 1) % count];
+
+        // Signed distance to the plane; nonnegative means "keep this vertex".
+        float const fromDistance = glm::dot(plane, from.clip);
+        float const toDistance = glm::dot(plane, to.clip);
+        bool const fromInside = fromDistance >= 0.0f;
+        bool const toInside = toDistance >= 0.0f;
+
+        // Inside vertices always survive, and they terminate the edge coming from outside.
+        if (fromInside && clippedCount < clipped.size()) {
+            clipped[clippedCount++] = from;
+        }
+
+        // An edge crossing the plane contributes the point where it intersects the plane.
+        // Both endpoints are on opposite sides, so the denominator cannot be zero.
+        if (fromInside != toInside && clippedCount < clipped.size()) {
+            float const t = fromDistance / (fromDistance - toDistance);
+            clipped[clippedCount++] = {glm::mix(from.clip, to.clip, t),
+                                       glm::mix(from.worldPosition, to.worldPosition, t),
+                                       glm::mix(from.normal, to.normal, t),
+                                       glm::mix(from.uv, to.uv, t)};
+        }
+    }
+
+    // Publish the clipped polygon back through the caller's buffer.
+    count = clippedCount;
+    for (size_t i = 0; i < clippedCount; ++i) {
+        polygon[i] = clipped[i];
+    }
     /***************************************** Todo End ******************************************/
 }
 
@@ -106,6 +142,44 @@ buildScreenTriangles(std::vector<ClipVertex> const& vertices, std::vector<uint32
             ScreenTriangle output{};
 
             /************************************ Todo Begin *************************************/
+            // Perspective divide and viewport mapping. 1/w is kept for the later
+            // perspective-correct attribute interpolation.
+            for (int corner = 0; corner < 3; ++corner) {
+                glm::vec4 const& clip = clipped[corner].clip;
+                float const invW = 1.0f / clip.w;
+                glm::vec3 const ndc = glm::vec3(clip) * invW;
+                output.vertices[corner].screenAndInvW = {((ndc.x * 0.5f) + 0.5f) * static_cast<float>(extent.x),
+                                                         ((ndc.y * 0.5f) + 0.5f) * static_cast<float>(extent.y),
+                                                         (ndc.z * 0.5f) + 0.5f,
+                                                         invW};
+                output.vertices[corner].worldPosition = clipped[corner].worldPosition;
+                output.vertices[corner].normal = clipped[corner].normal;
+                output.vertices[corner].uv = clipped[corner].uv;
+            }
+
+            // Signed screen area: positive means front-facing under the "Y up" viewport, and
+            // zero means the triangle collapsed into a line, so neither can be rasterized.
+            glm::vec2 const a(output.vertices[0].screenAndInvW);
+            glm::vec2 const b(output.vertices[1].screenAndInvW);
+            glm::vec2 const c(output.vertices[2].screenAndInvW);
+            if (glm::cross(b - a, c - a) <= 0.0f) {
+                continue;
+            }
+
+            // Derive the tangent frame from the world-space edges and their UV deltas.
+            glm::vec3 const edge1 = clipped[1].worldPosition - clipped[0].worldPosition;
+            glm::vec3 const edge2 = clipped[2].worldPosition - clipped[0].worldPosition;
+            glm::vec2 const delta1 = clipped[1].uv - clipped[0].uv;
+            glm::vec2 const delta2 = clipped[2].uv - clipped[0].uv;
+            float const determinant = (delta1.x * delta2.y) - (delta2.x * delta1.y);
+            if (std::abs(determinant) > 1e-12f) {
+                // A degenerate UV mapping would divide by zero, so the default frame is kept.
+                float const reciprocal = 1.0f / determinant;
+                output.tangent = (edge1 * delta2.y - edge2 * delta1.y) * reciprocal;
+                output.bitangent = (edge2 * delta1.x - edge1 * delta2.x) * reciprocal;
+            }
+
+            result.push_back(output);
             /************************************* Todo End **************************************/
         }
     }
@@ -143,12 +217,32 @@ static void rasterizeTriangles(std::vector<ScreenTriangle> const& triangles,
                 // TODO: Calculate barycentric coordinates of the pixel
                 // Hint: use the screen triangle vertices a, b, c
                 /************************************ Todo Begin *************************************/
+                // Edge functions of the already front-facing (positive area) triangle, scaled
+                // by that same area: each weight is 1 at its own vertex and 0 at the other two.
+                glm::vec3 const barycentric(glm::cross(b - p, c - p) / area,
+                                            glm::cross(c - p, a - p) / area,
+                                            glm::cross(a - p, b - p) / area);
+
+                // A negative weight puts the sample outside this edge. Samples lying exactly on
+                // an edge are kept so shared edges are not dropped.
+                if (barycentric.x < 0.0f || barycentric.y < 0.0f || barycentric.z < 0.0f) {
+                    continue;
+                }
                 /************************************* Todo End **************************************/
 
                 // TODO: Perform depth test
                 // Hint: Compare the calculated pixel depth with depthBuffer[pixelIndex]
                 // Hint: depthBuffer[pixelIndex] = ...
                 /************************************ Todo Begin *************************************/
+                // Window depth is affine in screen space, so it uses the plain barycentric
+                // weights; only the attribute interpolation needs the 1/w correction.
+                float const depth = (barycentric.x * triangle.vertices[0].screenAndInvW.z) +
+                                    (barycentric.y * triangle.vertices[1].screenAndInvW.z) +
+                                    (barycentric.z * triangle.vertices[2].screenAndInvW.z);
+                if (depth >= depthBuffer[pixelIndex]) {
+                    continue;
+                }
+                depthBuffer[pixelIndex] = depth;
                 /************************************* Todo End **************************************/
 
                 // TODO: Shade the pixel with pbrShade
@@ -158,6 +252,50 @@ static void rasterizeTriangles(std::vector<ScreenTriangle> const& triangles,
                 //       + uv
                 // Hint: colorBuffer[pixel] = ...;
                 /************************************ Todo Begin *************************************/
+                // Screen-space barycentrics are linear in 1/w, so scaling them by each vertex's
+                // invW and renormalizing recovers the projective-correct weights.
+                glm::vec3 const invW(triangle.vertices[0].screenAndInvW.w,
+                                     triangle.vertices[1].screenAndInvW.w,
+                                     triangle.vertices[2].screenAndInvW.w);
+                glm::vec3 const corrected = barycentric * invW;
+                glm::vec3 const weights = corrected / (corrected.x + corrected.y + corrected.z);
+
+                glm::vec3 const worldPosition = (weights.x * triangle.vertices[0].worldPosition) +
+                                                (weights.y * triangle.vertices[1].worldPosition) +
+                                                (weights.z * triangle.vertices[2].worldPosition);
+                glm::vec3 const normal = (weights.x * triangle.vertices[0].normal) +
+                                         (weights.y * triangle.vertices[1].normal) +
+                                         (weights.z * triangle.vertices[2].normal);
+                glm::vec2 const uv = (weights.x * triangle.vertices[0].uv) +
+                                     (weights.y * triangle.vertices[1].uv) +
+                                     (weights.z * triangle.vertices[2].uv);
+
+                // pbrShade returns linear HDR radiance; tonemapping happens in display.frag.
+                // The debug views write the same kind of linear value, so both backends
+                // produce the same picture for a given stage of the pipeline.
+                glm::vec3 color;
+                switch (frame.debugView) {
+                case 1:
+                    // Coverage only: the pixel is covered iff this constant color appears.
+                    color = glm::vec3(0.8f);
+                    break;
+                case 2:
+                    // Screen-space barycentric weights, one channel per vertex.
+                    color = barycentric;
+                    break;
+                case 3:
+                    // UV mapped directly to red and green.
+                    color = glm::vec3(uv, 0.0f);
+                    break;
+                case 4:
+                    // Interpolated world normal remapped from [-1, 1] to [0, 1].
+                    color = normal * 0.5f + 0.5f;
+                    break;
+                default:
+                    color = pbrShade(material, frame, worldPosition, normal, triangle.tangent, triangle.bitangent, uv);
+                    break;
+                }
+                colorBuffer[pixelIndex] = glm::vec4(color, 1.0f);
                 /************************************* Todo End **************************************/
             }
         }

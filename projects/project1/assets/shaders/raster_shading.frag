@@ -22,6 +22,8 @@ uniform float uRoughnessFactor;
 uniform float uOcclusionStrength;
 uniform bool uHasTexture[5];
 uniform sampler2D uTextures[5];
+// Staged-debugging switch; the CPU rasterizer uses the same numbering in FrameState.
+uniform int uDebugView;
 
 // Color textures store sRGB values, while lighting calculations use linear RGB.
 vec3 srgbToLinear(vec3 value) {
@@ -120,12 +122,32 @@ void main() {
     // CPU. gl_FragCoord.xy is the pixel center in framebuffer coordinates.
     // Hint: Use `discard` if the pixel is not inside the triangle
     /*************************************** TODO BEGIN ******************************************/
+    // A nonpositive area means a back-facing or degenerate triangle. The CPU path
+    // culls these, and face culling is not enabled for the candidate primitives.
+    if (area <= 0.0) {
+        discard;
+    }
+
+    // Edge functions normalized by the signed area: each weight is 1 at its own vertex.
+    vec3 barycentric = vec3((b.x - p.x) * (c.y - p.y) - (b.y - p.y) * (c.x - p.x),
+                            (c.x - p.x) * (a.y - p.y) - (c.y - p.y) * (a.x - p.x),
+                            (a.x - p.x) * (b.y - p.y) - (a.y - p.y) * (b.x - p.x)) / area;
+
+    // Negative weight means the sample is outside that edge; zero counts as covered.
+    if (barycentric.x < 0.0 || barycentric.y < 0.0 || barycentric.z < 0.0) {
+        discard;
+    }
     /**************************************** TODO END *******************************************/
 
     // TODO: Write the pixel depth from screen-space barycentric coordinates.
     // Window-space depth is affine in the screen-space barycentrics.
     // Hint: write the depth value into gl_FragDepth
     /*************************************** TODO BEGIN ******************************************/
+    // No 1/w correction here: window depth is already affine in screen space, exactly
+    // like the depth test in rasterizeTriangles(). OpenGL performs the comparison.
+    gl_FragDepth = barycentric.x * gScreenAndInvW[0].z +
+                   barycentric.y * gScreenAndInvW[1].z +
+                   barycentric.z * gScreenAndInvW[2].z;
     /**************************************** TODO END *******************************************/
 
     // TODO: Calculate the attributes needed to shade the pixel with pbrShade.
@@ -133,12 +155,50 @@ void main() {
     // Hint: Derive tangent and bitangent from world-position and UV edges;
     //       keep the fallback axes when the UVs are degenerate.
     /*************************************** TODO BEGIN ******************************************/
-    vec3 worldPosition = vec3(0.0);
-    vec3 normal = vec3(0.0, 0.0, 1.0);
+    // Screen barycentrics interpolate 1/w linearly, so multiplying by each vertex's
+    // invW and renormalizing yields the perspective-correct weights.
+    vec3 invW = vec3(gScreenAndInvW[0].w, gScreenAndInvW[1].w, gScreenAndInvW[2].w);
+    vec3 corrected = barycentric * invW;
+    vec3 weights = corrected / (corrected.x + corrected.y + corrected.z);
+
+    vec3 worldPosition = weights.x * gWorld[0] + weights.y * gWorld[1] + weights.z * gWorld[2];
+    vec3 normal = weights.x * gNormal[0] + weights.y * gNormal[1] + weights.z * gNormal[2];
+    vec2 uv = weights.x * gUv[0] + weights.y * gUv[1] + weights.z * gUv[2];
+
+    // Tangent frame from world-space edges and UV deltas, as in buildScreenTriangles().
+    // Degenerate UV mappings keep the fallback axes used by the CPU path.
     vec3 tangent = vec3(1.0, 0.0, 0.0);
     vec3 bitangent = vec3(0.0, 1.0, 0.0);
-    vec2 uv = vec2(0.0);
+    vec3 edge1 = gWorld[1] - gWorld[0];
+    vec3 edge2 = gWorld[2] - gWorld[0];
+    vec2 delta1 = gUv[1] - gUv[0];
+    vec2 delta2 = gUv[2] - gUv[0];
+    float determinant = delta1.x * delta2.y - delta2.x * delta1.y;
+    if (abs(determinant) > 1e-12) {
+        float reciprocal = 1.0 / determinant;
+        tangent = (edge1 * delta2.y - edge2 * delta1.y) * reciprocal;
+        bitangent = (edge2 * delta1.x - edge1 * delta2.x) * reciprocal;
+    }
     /**************************************** TODO END *******************************************/
 
-    outColor = vec4(pbrShade(worldPosition, normal, tangent, bitangent, uv), 1.0);
+    // Debug views write linear values of the same kind as pbrShade(), so both
+    // backends go through the identical display pass and stay comparable.
+    vec3 color;
+    if (uDebugView == 1) {
+        // Coverage only: the pixel is covered iff this constant color appears.
+        color = vec3(0.8);
+    } else if (uDebugView == 2) {
+        // Screen-space barycentric weights, one channel per vertex.
+        color = barycentric;
+    } else if (uDebugView == 3) {
+        // UV mapped directly to red and green.
+        color = vec3(uv, 0.0);
+    } else if (uDebugView == 4) {
+        // Interpolated world normal remapped from [-1, 1] to [0, 1].
+        color = normal * 0.5 + 0.5;
+    } else {
+        color = pbrShade(worldPosition, normal, tangent, bitangent, uv);
+    }
+
+    outColor = vec4(color, 1.0);
 }

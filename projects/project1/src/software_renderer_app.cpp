@@ -1,5 +1,6 @@
 #include "software_renderer_app.h"
 
+#include <cmath>
 #include <cstdint>
 #include <format>
 #include <limits>
@@ -17,6 +18,8 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
+#include "debug_scene.h"
+
 constexpr char const* kModelPath = "models/DamagedHelmet.gltf";
 constexpr char const* kTransformPath = "shaders/transform.vert";
 constexpr char const* kRasterVertexPath = "shaders/raster_input.vert";
@@ -30,6 +33,7 @@ SoftwareRendererApp::SoftwareRendererApp(Config const& config)
     : Application(config) {
     // scene
     m_scene = std::make_unique<RasterScene>(getAssetPath(kModelPath));
+    m_debugScene = std::make_unique<DebugScene>();
 
     // camera
     m_camera.aspect = m_window.aspectRatio();
@@ -137,19 +141,33 @@ void SoftwareRendererApp::renderFrame() {
     m_window.setTitle(std::format("Software Renderer | {:.1f} FPS", fps));
 
     // render the scene
+    bool const debugPage = m_sceneMode != SceneMode::Helmet;
+    if (!m_pauseRotation && !debugPage) {
+        m_modelAngle = std::fmod(m_modelAngle + deltaTime * kModelRotateSpeed, glm::two_pi<float>());
+    }
+    // The debug pages are authored directly in world space and must not spin, otherwise
+    // the individual stage tests would be hard to compare between the two rasterizers.
+    glm::mat4 const model = debugPage
+        ? glm::mat4(1.0f)
+        : glm::rotate(glm::mat4(1.0f), m_modelAngle, glm::vec3(0.0f, 1.0f, 0.0f));
     FrameState sceneFrame{
-        .model = glm::rotate(glm::mat4(1.0f), getTotalTime() * kModelRotateSpeed, glm::vec3(0.0f, 1.0f, 0.0f)),
+        .model = model,
         .view = m_camera.getViewMatrix(),
         .projection = m_camera.getProjectionMatrix(),
         .cameraPosition = m_camera.transform.position,
         .directionalLight = m_directionalLight,
         .extent = {width, height},
+        .debugView = m_debugView,
     };
 
     Renderer& renderer = m_renderBackend == RenderBackend::Cpu ? static_cast<Renderer&>(*m_cpuRenderer)
                                                                : static_cast<Renderer&>(*m_gpuRenderer);
+    std::vector<DrawItem> const& drawItems =
+        debugPage ? m_debugScene->items(m_sceneMode == SceneMode::DebugStage ? DebugScene::Page::Stage
+                                                                           : DebugScene::Page::Clip)
+                  : m_scene->drawItems();
     renderer.clear();
-    for (DrawItem const& drawItem : m_scene->drawItems()) {
+    for (DrawItem const& drawItem : drawItems) {
         validateDrawItem(drawItem);
         renderer.render(drawItem, frameForDrawItem(sceneFrame, drawItem));
     }
@@ -188,8 +206,42 @@ void SoftwareRendererApp::renderUi() {
         ImGui::RadioButton("GPU fragment", &mode, static_cast<int>(RenderBackend::Gpu));
         m_renderBackend = static_cast<RenderBackend>(mode);
         ImGui::Separator();
+        bool const wasHelmet = m_sceneMode == SceneMode::Helmet;
+        int scene = static_cast<int>(m_sceneMode);        ImGui::RadioButton("model", &scene, static_cast<int>(SceneMode::Helmet));
+        ImGui::SameLine();
+        ImGui::RadioButton("stage", &scene, static_cast<int>(SceneMode::DebugStage));
+        ImGui::SameLine();
+        ImGui::RadioButton("clip", &scene, static_cast<int>(SceneMode::DebugClip));
+        m_sceneMode = static_cast<SceneMode>(scene);
+        bool const isHelmet = m_sceneMode == SceneMode::Helmet;
+        if (wasHelmet && !isHelmet) {
+            // Keep the model look untouched: the debug pages are lit by a calmer light
+            // so a blown-out albedo does not hide the stage tests.
+            m_modelLightIntensity = m_directionalLight.intensity;
+            m_directionalLight.intensity = 4.0f;
+        } else if (!wasHelmet && isHelmet) {
+            m_directionalLight.intensity = m_modelLightIntensity;
+        }
+        ImGui::Separator();
         ImGui::ColorEdit3("light color", &m_directionalLight.color.x);
         ImGui::SliderFloat("light intensity", &m_directionalLight.intensity, 0.0f, 20.0f);
+        // Staged debugging: show what a single pipeline stage produces (README 8.1).
+        int view = m_debugView;
+        ImGui::RadioButton("shaded", &view, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("flat", &view, 1);
+        ImGui::SameLine();
+        ImGui::RadioButton("bary", &view, 2);
+        ImGui::SameLine();
+        ImGui::RadioButton("uv", &view, 3);
+        ImGui::SameLine();
+        ImGui::RadioButton("normal", &view, 4);
+        m_debugView = view;
+        if (m_sceneMode == SceneMode::Helmet) {
+            ImGui::Separator();
+            ImGui::Checkbox("pause rotation", &m_pauseRotation);
+            ImGui::SliderAngle("model angle", &m_modelAngle, 0.0f, 360.0f);
+        }
     }
     ImGui::End();
     ImGui::Render();

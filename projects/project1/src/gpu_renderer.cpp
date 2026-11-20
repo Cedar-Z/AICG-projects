@@ -143,6 +143,8 @@ void GpuRenderer::render(DrawItem const& drawItem, FrameState const& frame) {
     m_rasterProgram->setUniform("uLightDirection", frame.directionalLight.transform.getFront());
     m_rasterProgram->setUniform("uLightColor", frame.directionalLight.color);
     m_rasterProgram->setUniform("uLightIntensity", frame.directionalLight.intensity);
+    // Staged-debugging switch; 0 means the regular PBR shading path.
+    m_rasterProgram->setUniform("uDebugView", frame.debugView);
     setMaterial(*drawItem.material);
     m_feedbackVao.bind();
     m_transformFeedback.draw(gfx::RHI::Primitive::Triangles);

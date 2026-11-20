@@ -17,10 +17,14 @@ out vec2 tfUv;
 void main() {
     // TODO: apply mvp transformation for each vertices
     /*************************************** TODO BEGIN ******************************************/
-    tfClip = vec4(0.0, 0.0, 0.0, 1.0);
-    tfWorldPosition = vec3(0.0);
-    tfNormal = vec3(0.0, 0.0, 1.0);
-    tfUv = vec2(0.0);
+    // World position comes from the model matrix alone; the clip position must keep the
+    // homogeneous w so clipping still happens after this stage.
+    vec4 worldPosition = uModel * vec4(aPosition, 1.0);
+    tfClip = uModelViewProjection * vec4(aPosition, 1.0);
+    tfWorldPosition = worldPosition.xyz;
+    // uNormalTransform is already inverse-transpose(model), matching transformVertices().
+    tfNormal = normalize(uNormalTransform * aNormal);
+    tfUv = aUv;
     gl_Position = tfClip;
     /**************************************** TODO END *******************************************/
 }
